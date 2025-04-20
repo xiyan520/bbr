@@ -10,17 +10,19 @@ jobs:
     steps:
     - name: 准备环境和工具链
       run: |
-        # 更新 apt 包列表
+        # 更新 apt 包列表 (第一次)
         sudo apt-get update
 
-        # --- 添加以下两行来启用 deb-src 仓库 ---
-        # 启用 deb-src 仓库以使用 apt build-dep
-        sudo sed -i 's/^# deb /deb /' /etc/apt/sources.list
+        # --- 再次尝试启用所有 deb-src 仓库 ---
+        # 启用所有以 '# deb-src' 开头的行，不论后面是否有空格或其他字符紧跟
+        # 这个 sed 命令更通用，会移除行首的 '# ' 或 '#' 如果后面紧跟着 'deb-src'
+        sudo sed -i 's/^#\s*deb-src/deb-src/' /etc/apt/sources.list
         # 再次更新 apt 包列表以加载 deb-src 信息
         sudo apt-get update
-        # ------------------------------------
+        # -------------------------------------
 
         # 安装编译内核所需的大部分依赖
+        # 如果上面 deb-src 启用成功且 update 正常，这一步应该能找到依赖
         sudo apt-get build-dep linux -y
         # 安装编译 .deb 包所需的额外工具
         sudo apt-get install -y fakeroot kernel-package ncurses-dev xz-utils libssl-dev build-essential cpio flex bison libelf-dev libncurses-dev libslang2-dev rsync
