@@ -5,36 +5,60 @@ on:
 
 jobs:
   build_kernel:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-latest # 使用最新的 Ubuntu runner
 
     steps:
     - name: 准备环境和工具链
       run: |
         # 更新 apt 包列表 (第一次)
+        echo "--> 第一次 apt-get update"
         sudo apt-get update
+        echo "<-- 第一次 apt-get update 完成"
 
-        # --- 再次尝试启用所有 deb-src 仓库 ---
-        # 启用所有以 '# deb-src' 开头的行，不论后面是否有空格或其他字符紧跟
-        # 这个 sed 命令更通用，会移除行首的 '# ' 或 '#' 如果后面紧跟着 'deb-src'
-        sudo sed -i 's/^#\s*deb-src/deb-src/' /etc/apt/sources.list
+        # --- 确保添加标准的 deb-src 仓库 ---
+        echo "--> 添加标准的 deb-src 仓库到 sources.list"
+        # 动态获取 Ubuntu 版本代号 (例如 noble)
+        UBUNTU_CODENAME=$(lsb_release -sc)
+        echo "检测到 Ubuntu 版本代号: $UBUNTU_CODENAME"
+
+        # 添加主要的 deb-src 源 (main, restricted, universe, multiverse)
+        echo "deb-src http://archive.ubuntu.com/ubuntu/ $UBUNTU_CODENAME main restricted universe multiverse" | sudo tee -a /etc/apt/sources.list
+        echo "deb-src http://archive.ubuntu.com/ubuntu/ $UBUNTU_CODENAME-updates main restricted universe multiverse" | sudo tee -a /etc/apt/sources.list
+        echo "deb-src http://archive.ubuntu.com/ubuntu/ $UBUNTU_CODENAME-security main restricted universe multiverse" | sudo tee -a /etc/apt/sources.list
+        echo "deb-src http://archive.ubuntu.com/ubuntu/ $UBUNTU_CODENAME-backports main restricted universe multiverse" | sudo tee -a /etc/apt/sources.list
+
+        # (可选但无害) 再次尝试取消注释已存在的 deb-src 行，以防万一格式不同
+        # sudo sed -i 's/^#\s*deb-src/deb-src/' /etc/apt/sources.list
+
+        echo "<-- 添加 deb-src 仓库完成"
+
         # 再次更新 apt 包列表以加载 deb-src 信息
+        echo "--> 第二次 apt-get update (加载 deb-src 信息)"
         sudo apt-get update
-        # -------------------------------------
+        echo "<-- 第二次 apt-get update 完成"
+        # -------------------------------------------
 
         # 安装编译内核所需的大部分依赖
-        # 如果上面 deb-src 启用成功且 update 正常，这一步应该能找到依赖
+        echo "--> 运行 apt-get build-dep linux"
         sudo apt-get build-dep linux -y
+        echo "<-- apt-get build-dep linux 完成"
+
         # 安装编译 .deb 包所需的额外工具
+        echo "--> 安装额外的构建工具"
         sudo apt-get install -y fakeroot kernel-package ncurses-dev xz-utils libssl-dev build-essential cpio flex bison libelf-dev libncurses-dev libslang2-dev rsync
+        echo "<-- 安装额外的构建工具完成"
 
     - name: 克隆 Linux 内核源码 (v6.1 分支)
       run: |
+        echo "--> 克隆 Linux 内核源码"
         git clone https://github.com/torvalds/linux.git kernel-source
         cd kernel-source
         git checkout v6.1
+        echo "<-- 克隆 Linux 内核源码完成"
 
     - name: 准备内核配置 (.config) 并启用 BBR
       run: |
+        echo "--> 准备内核配置"
         cd kernel-source
         make defconfig
         echo "CONFIG_TCP_CONG_BBR=y" >> .config
@@ -42,16 +66,21 @@ jobs:
         make oldconfig
         grep CONFIG_TCP_CONG_BBR .config || echo "Warning: CONFIG_TCP_CONG_BBR not found or not enabled in .config"
         grep CONFIG_NET_SCH_FQ .config || echo "Warning: CONFIG_NET_SCH_FQ not found or not enabled in .config"
+        echo "<-- 准备内核配置完成"
 
     - name: 编译内核和模块，生成 Debian 包
       run: |
+        echo "--> 编译内核和模块"
         cd kernel-source
         export DEBEMAIL="github_actions@example.com"
         export DEBFULLNAME="GitHub Actions"
         make -j $(nproc) bindeb-pkg
+        echo "<-- 编译内核和模块完成"
 
     - name: 上传生成的 Debian 包
       uses: actions/upload-artifact@v4
       with:
         name: kernel-debs
         path: ../*.deb
+      env: # 添加一些环境变量帮助排查上传问题 (可选)
+        ACTIONS_STEP_DEBUG: true # 启用步骤调试日志
