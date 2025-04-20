@@ -1,75 +1,55 @@
 name: 编译 Linux 6.1.0-9-amd64 内核 (使用 BBRv3 配置)
 
 on:
-  # 手动触发工作流
   workflow_dispatch:
 
 jobs:
   build_kernel:
-    runs-on: ubuntu-latest # 使用最新的 Ubuntu runner
+    runs-on: ubuntu-latest
 
     steps:
     - name: 准备环境和工具链
       run: |
-        # 更新 apt 包列表并安装必要的构建依赖
+        # 更新 apt 包列表
         sudo apt-get update
-        # build-dep linux 会安装编译内核所需的大部分依赖
+
+        # --- 添加以下两行来启用 deb-src 仓库 ---
+        # 启用 deb-src 仓库以使用 apt build-dep
+        sudo sed -i 's/^# deb /deb /' /etc/apt/sources.list
+        # 再次更新 apt 包列表以加载 deb-src 信息
+        sudo apt-get update
+        # ------------------------------------
+
+        # 安装编译内核所需的大部分依赖
         sudo apt-get build-dep linux -y
         # 安装编译 .deb 包所需的额外工具
         sudo apt-get install -y fakeroot kernel-package ncurses-dev xz-utils libssl-dev build-essential cpio flex bison libelf-dev libncurses-dev libslang2-dev rsync
 
     - name: 克隆 Linux 内核源码 (v6.1 分支)
       run: |
-        # 克隆主线 Linux 内核仓库，获取 v6.1 分支
         git clone https://github.com/torvalds/linux.git kernel-source
         cd kernel-source
-        git checkout v6.1 # 切换到 v6.1 分支
+        git checkout v6.1
 
     - name: 准备内核配置 (.config) 并启用 BBR
       run: |
         cd kernel-source
-
-        # 方式1: 使用默认配置 (可能需要根据提示选择新选项)
-        # make defconfig
-
-        # 方式2: 如果你有现有的配置文件 (例如从 /boot/config-...)
-        # 将你的配置文件命名为 .config 放在 kernel-source 目录下
-        # cp /path/to/your/config .config
-
-        # 为了自动化，这里使用 defconfig 并手动修改或使用 oldconfig
-        # 使用 defconfig 生成基础配置
         make defconfig
-
-        # 确保 BBR 和 FQ (Fair Queueing, BBR 推荐搭配) 被启用
-        # 查找并替换或添加配置项
-        # 注意：sed 命令需要根据 .config 文件中具体行的格式调整
-        # 如果配置项不存在，可能需要手动添加或使用 make menuconfig/oldconfig
-        # 以下是尝试启用 CONFIG_TCP_CONG_BBR 和 CONFIG_NET_SCH_FQ
         echo "CONFIG_TCP_CONG_BBR=y" >> .config
         echo "CONFIG_NET_SCH_FQ=y" >> .config
-
-        # 运行 oldconfig 以处理新添加的或冲突的配置项
-        # 非交互模式下，它会接受默认值或跳过需要用户输入的选项
         make oldconfig
-
-        # 再次检查 BBR 和 FQ 是否已启用 (可选)
         grep CONFIG_TCP_CONG_BBR .config || echo "Warning: CONFIG_TCP_CONG_BBR not found or not enabled in .config"
         grep CONFIG_NET_SCH_FQ .config || echo "Warning: CONFIG_NET_SCH_FQ not found or not enabled in .config"
-
 
     - name: 编译内核和模块，生成 Debian 包
       run: |
         cd kernel-source
-        # 设置环境变量，make deb-pkg 需要这些信息
-        export DEBEMAIL="github_actions@example.com" # 你的邮件地址
-        export DEBFULLNAME="GitHub Actions" # 你的名字
-
-        # 使用 make deb-pkg 编译内核、模块并生成 .deb 安装包
-        # -j $(nproc) 使用所有可用的 CPU 核心进行并行编译
+        export DEBEMAIL="github_actions@example.com"
+        export DEBFULLNAME="GitHub Actions"
         make -j $(nproc) bindeb-pkg
 
     - name: 上传生成的 Debian 包
-      uses: actions/upload-artifact@v4 # 使用上传产物的 action
+      uses: actions/upload-artifact@v4
       with:
-        name: kernel-debs # 产物名称
-        path: ../*.deb # 指定上传路径，make bindeb-pkg 会将 .deb 包放在源码目录的上一级
+        name: kernel-debs
+        path: ../*.deb
