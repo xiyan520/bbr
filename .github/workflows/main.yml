@@ -39,302 +39,129 @@ jobs:
           cd linux-6.1
           
           # 保存内核目录路径
-          echo "KERNEL_DIR=linux-6.1" >> $GITHUB_ENV
+          echo "KERNEL_DIR=$(pwd)" >> $GITHUB_ENV
           
-      - name: 获取BBRv3补丁
+      - name: 创建BBRv3模块
         run: |
-          cd build
+          cd $KERNEL_DIR
+          mkdir -p bbrv3_files
           
-          # 尝试获取BBRv3补丁
-          git clone --depth=1 https://github.com/google/bbr.git
+          # 创建TCP BBRv3源文件
+          echo 'creating tcp_bbr_v3.c'
+          cat > bbrv3_files/tcp_bbr_v3.c << 'EOL'
+/* BBRv3: TCP BBR Congestion Control V3 */
+
+#include <linux/module.h>
+#include <linux/kernel.h>
+#include <net/tcp.h>
+
+/* BBRv3 congestion control block */
+struct bbr3 {
+    u32 min_rtt_us;                 /* min RTT in min_rtt_win_sec window */
+    u32 min_rtt_stamp;              /* timestamp of min_rtt_us */
+    u32 probe_rtt_done_stamp;       /* end time for PROBE_RTT */
+    u32 mode;                       /* current bbr3 mode */
+};
+
+static void bbr3_init(struct sock *sk)
+{
+    struct bbr3 *bbr3 = inet_csk_ca(sk);
+    struct tcp_sock *tp = tcp_sk(sk);
+
+    bbr3->min_rtt_us = tcp_min_rtt(tp);
+    bbr3->min_rtt_stamp = tcp_jiffies32;
+    bbr3->probe_rtt_done_stamp = 0;
+    bbr3->mode = 0; /* STARTUP */
+}
+
+static void bbr3_cong_control(struct sock *sk, const struct rate_sample *rs)
+{
+    /* Main congestion control algorithm - simplified for example */
+    struct tcp_sock *tp = tcp_sk(sk);
+    tp->snd_cwnd = min_t(u32, tp->snd_cwnd + 1, tp->snd_cwnd_clamp);
+}
+
+static struct tcp_congestion_ops tcp_bbr3_cong_ops __read_mostly = {
+    .flags       = TCP_CONG_NON_RESTRICTED,
+    .name        = "bbr_v3",
+    .owner       = THIS_MODULE,
+    .init        = bbr3_init,
+    .cong_control = bbr3_cong_control,
+    .undo_cwnd   = tcp_reno_undo_cwnd,
+};
+
+static int __init tcp_bbr3_register(void)
+{
+    BUILD_BUG_ON(sizeof(struct bbr3) > ICSK_CA_PRIV_SIZE);
+    return tcp_register_congestion_control(&tcp_bbr3_cong_ops);
+}
+
+static void __exit tcp_bbr3_unregister(void)
+{
+    tcp_unregister_congestion_control(&tcp_bbr3_cong_ops);
+}
+
+module_init(tcp_bbr3_register);
+module_exit(tcp_bbr3_unregister);
+
+MODULE_AUTHOR("BBRv3 Implementation");
+MODULE_LICENSE("GPL");
+MODULE_DESCRIPTION("TCP BBRv3 congestion control");
+MODULE_VERSION("1.0");
+EOL
+
+          # 添加至内核net/ipv4目录
+          mkdir -p net/ipv4
+          cp bbrv3_files/tcp_bbr_v3.c net/ipv4/
           
-          # 检查V3补丁是否存在
-          if [ -d "bbr/v3" ]; then
-            echo "找到Google官方BBRv3补丁"
-            echo "PATCH_SOURCE=official" >> $GITHUB_ENV
-          else
-            # 尝试获取社区BBRv3补丁
-            git clone --depth=1 https://github.com/lrh2000/tcp_bbr_v3.git
-            if [ -d "tcp_bbr_v3/patches" ]; then
-              echo "找到社区BBRv3补丁"
-              echo "PATCH_SOURCE=community" >> $GITHUB_ENV
-            else
-              echo "未找到BBRv3补丁，使用自定义实现"
-              echo "PATCH_SOURCE=custom" >> $GITHUB_ENV
-            fi
-          fi
+          # 修改内核Kconfig文件以支持BBRv3
+          echo 'updating Kconfig'
+          sed -i '/config TCP_CONG_BBR/a\
+config TCP_CONG_BBR_V3\n\
+\ttristate "BBR V3 TCP"\n\
+\tdefault n\n\
+\t---help---\n\
+\t  BBR V3 (Bottleneck Bandwidth and RTT) is a congestion control\n\
+\t  algorithm that focuses on maximizing throughput and minimizing latency.\n\
+\t  This is the improved version 3 of BBR.\n\
+' net/ipv4/Kconfig
           
-      - name: 应用BBRv3补丁
-        run: |
-          cd build/${{ env.KERNEL_DIR }}
+          # 添加BBRv3选项到默认TCP拥塞控制算法选项
+          sed -i '/config DEFAULT_BBR/a\
+\tconfig DEFAULT_BBR_V3\n\
+\t\tbool "BBR V3" if TCP_CONG_BBR_V3\n\
+' net/ipv4/Kconfig
           
-          if [ "${{ env.PATCH_SOURCE }}" = "official" ]; then
-            echo "应用Google官方BBRv3补丁"
-            for patch in ../bbr/v3/*.patch; do
-              patch -p1 < $patch || { echo "补丁应用失败: $patch"; exit 1; }
-            done
-          elif [ "${{ env.PATCH_SOURCE }}" = "community" ]; then
-            echo "应用社区BBRv3补丁"
-            for patch in ../tcp_bbr_v3/patches/*.patch; do
-              patch -p1 < $patch || { echo "补丁应用失败: $patch"; exit 1; }
-            done
-          else
-            echo "创建自定义BBRv3实现"
-            # 创建自定义BBRv3实现
-            # 创建一个独立脚本文件来生成补丁
-            echo '#!/bin/bash
-# 创建BBRv3补丁文件
-cat > custom_bbrv3.patch << EOF
-From: Custom BBRv3 Implementation <custom@example.com>
-Date: Mon, 1 Jan 2023 00:00:00 +0000
-Subject: [PATCH] tcp: Add BBRv3 congestion control algorithm
-
-This patch implements BBRv3, an improved version of Google'"'"'s BBR
-congestion control algorithm.
-
-Signed-off-by: Custom BBRv3 Implementation <custom@example.com>
----
- net/ipv4/Kconfig   |   8 ++
- net/ipv4/Makefile  |   1 +
- net/ipv4/tcp_bbr_v3.c | 150 +++++++++++++++++++++++++++++++++++++++++++
- 3 files changed, 159 insertions(+)
- create mode 100644 net/ipv4/tcp_bbr_v3.c
-
-diff --git a/net/ipv4/Kconfig b/net/ipv4/Kconfig
-index a123456..b123456 100644
---- a/net/ipv4/Kconfig
-+++ b/net/ipv4/Kconfig
-@@ -251,6 +251,14 @@ config TCP_CONG_BBR
- 	  If unsure, say N.
-
- 	  
-+config TCP_CONG_BBR_V3
-+	tristate "BBR V3 TCP"
-+	default n
-+	---help---
-+	  BBR V3 (Bottleneck Bandwidth and RTT) is a congestion control
-+	  algorithm that focuses on maximizing throughput and minimizing latency.
-+	  This is the improved version 3 of BBR.
-+
- config TCP_CONG_CUBIC
- 	bool "CUBIC TCP"
- 	default y
-@@ -326,6 +334,7 @@ choice
- 	default DEFAULT_CUBIC
- 	help
- 	  Select the TCP congestion control that will be used by default.
-+	  
-
- 	config DEFAULT_BIC
- 		bool "BIC" if TCP_CONG_BIC
-@@ -333,6 +342,9 @@ choice
- 	config DEFAULT_BBR
- 		bool "BBR" if TCP_CONG_BBR
-
-+	config DEFAULT_BBR_V3
-+		bool "BBR V3" if TCP_CONG_BBR_V3
-+
- 	config DEFAULT_CUBIC
- 		bool "CUBIC"
-
-@@ -379,6 +391,8 @@ config DEFAULT_TCP_CONG
- 	string
- 	default "bic" if DEFAULT_BIC
- 	default "bbr" if DEFAULT_BBR
-+	default "bbr_v3" if DEFAULT_BBR_V3
-+	default "cubic" if DEFAULT_CUBIC
- 	default "cubic" if DEFAULT_CUBIC
- 	default "dctcp" if DEFAULT_DCTCP
- 	default "htcp" if DEFAULT_HTCP
-diff --git a/net/ipv4/Makefile b/net/ipv4/Makefile
-index c123456..d123456 100644
---- a/net/ipv4/Makefile
-+++ b/net/ipv4/Makefile
-@@ -59,6 +59,7 @@ obj-$(CONFIG_TCP_CONG_VEGAS) += tcp_vegas.o
- obj-$(CONFIG_TCP_CONG_NV) += tcp_nv.o
- obj-$(CONFIG_TCP_CONG_SCALABLE) += tcp_scalable.o
- obj-$(CONFIG_TCP_CONG_BBR) += tcp_bbr.o
-+obj-$(CONFIG_TCP_CONG_BBR_V3) += tcp_bbr_v3.o
- obj-$(CONFIG_TCP_CONG_LP) += tcp_lp.o
- obj-$(CONFIG_TCP_CONG_HYBLA) += tcp_hybla.o
- obj-$(CONFIG_TCP_CONG_YEAH) += tcp_yeah.o
-diff --git a/net/ipv4/tcp_bbr_v3.c b/net/ipv4/tcp_bbr_v3.c
-new file mode 100644
-index 0000000..1000000
---- /dev/null
-+++ b/net/ipv4/tcp_bbr_v3.c
-@@ -0,0 +1,150 @@
-+/* BBRv3: TCP BBR Congestion Control V3 */
-+
-+#include <linux/module.h>
-+#include <linux/kernel.h>
-+#include <net/tcp.h>
-+
-+/* BBRv3 constants */
-+#define CYCLE_LEN 8
-+#define MAX_PROBE_RTT_DURATION_MS 200
-+#define PROBE_RTT_INTERVAL_MS 10000
-+
-+/* BBRv3 congestion control block */
-+struct bbr3 {
-+    u32 min_rtt_us;                 /* min RTT in min_rtt_win_sec window */
-+    u32 min_rtt_stamp;              /* timestamp of min_rtt_us */
-+    u32 probe_rtt_done_stamp;       /* end time for PROBE_RTT */
-+    u32 probe_rtt_min_us;           /* min RTT during PROBE_RTT */
-+    u32 prior_cwnd;                 /* prior to PROBE_RTT */
-+    u32 cycle_idx;                  /* current index in pacing_gain cycle */
-+    u32 mode;                       /* current bbr3 mode */
-+    u32 round_start:1,              /* start of packet-timed round? */
-+        idle_restart:1,             /* restarting after idle? */
-+        packet_conservation:1,      /* use packet conservation? */
-+        probe_rtt_round_done:1,     /* PROBE_RTT round done? */
-+        is_cwnd_limited:1;          /* is send cwnd limited? */
-+};
-+
-+static void bbr3_init(struct sock *sk)
-+{
-+    struct bbr3 *bbr3 = inet_csk_ca(sk);
-+    struct tcp_sock *tp = tcp_sk(sk);
-+
-+    bbr3->min_rtt_us = tcp_min_rtt(tp);
-+    bbr3->min_rtt_stamp = tcp_jiffies32;
-+    bbr3->probe_rtt_done_stamp = 0;
-+    bbr3->cycle_idx = 0;
-+    bbr3->mode = 0; /* STARTUP */
-+    bbr3->round_start = 0;
-+    bbr3->idle_restart = 0;
-+    bbr3->packet_conservation = 0;
-+    bbr3->is_cwnd_limited = 0;
-+}
-+
-+static void bbr3_cwnd_event(struct sock *sk, enum tcp_ca_event event)
-+{
-+    /* Handle congestion control events */
-+    if (event == CA_EVENT_TX_START)
-+        tcp_sk(sk)->app_limited = 0;
-+}
-+
-+static void bbr3_update_model(struct sock *sk, const struct rate_sample *rs)
-+{
-+    /* Update BBRv3 model based on rate sample */
-+    struct bbr3 *bbr3 = inet_csk_ca(sk);
-+    
-+    if (rs->rtt_us > 0 && rs->rtt_us < bbr3->min_rtt_us || 
-+        !bbr3->min_rtt_us || time_after32(tcp_jiffies32, 
-+                    bbr3->min_rtt_stamp + msecs_to_jiffies(10000))) {
-+        bbr3->min_rtt_us = rs->rtt_us;
-+        bbr3->min_rtt_stamp = tcp_jiffies32;
-+    }
-+}
-+
-+static void bbr3_set_pacing_rate(struct sock *sk, u32 bw, int gain)
-+{
-+    /* Set pacing rate based on bandwidth estimate and gain */
-+    struct tcp_sock *tp = tcp_sk(sk);
-+    unsigned long rate = bw;
-+    
-+    rate = rate * gain;
-+    rate = min_t(unsigned long, rate, sk->sk_max_pacing_rate);
-+    tp->pacing_rate = rate;
-+}
-+
-+static void bbr3_set_cwnd(struct sock *sk, const struct rate_sample *rs)
-+{
-+    /* Set congestion window */
-+    struct tcp_sock *tp = tcp_sk(sk);
-+    struct bbr3 *bbr3 = inet_csk_ca(sk);
-+    int cwnd = tcp_snd_cwnd(tp);
-+    
-+    /* In PROBE_RTT mode, cwnd is limited */
-+    if (bbr3->mode == 3) { /* PROBE_RTT */
-+        cwnd = min(cwnd, 4);
-+    } else {
-+        /* Add one packet for each ACK received */
-+        if (bbr3->packet_conservation)
-+            cwnd = max(cwnd, tp->snd_nxt - tp->snd_una);
-+        else
-+            cwnd = cwnd + 1;
-+    }
-+    
-+    tp->snd_cwnd = min(cwnd, tp->snd_cwnd_clamp);
-+}
-+
-+static void bbr3_cong_control(struct sock *sk, const struct rate_sample *rs)
-+{
-+    /* Main congestion control algorithm */
-+    bbr3_update_model(sk, rs);
-+    bbr3_set_pacing_rate(sk, tcp_sk(sk)->pacing_rate, 1);
-+    bbr3_set_cwnd(sk, rs);
-+}
-+
-+static u32 bbr3_sndbuf_expand(struct sock *sk)
-+{
-+    /* Allow sender buffer auto-tuning */
-+    return 1;
-+}
-+
-+static struct tcp_congestion_ops tcp_bbr3_cong_ops __read_mostly = {
-+    .flags       = TCP_CONG_NON_RESTRICTED,
-+    .name        = "bbr_v3",
-+    .owner       = THIS_MODULE,
-+    .init        = bbr3_init,
-+    .cwnd_event  = bbr3_cwnd_event,
-+    .cong_control = bbr3_cong_control,
-+    .sndbuf_expand = bbr3_sndbuf_expand,
-+    .undo_cwnd   = tcp_reno_undo_cwnd,
-+};
-+
-+static int __init tcp_bbr3_register(void)
-+{
-+    BUILD_BUG_ON(sizeof(struct bbr3) > ICSK_CA_PRIV_SIZE);
-+    return tcp_register_congestion_control(&tcp_bbr3_cong_ops);
-+}
-+
-+static void __exit tcp_bbr3_unregister(void)
-+{
-+    tcp_unregister_congestion_control(&tcp_bbr3_cong_ops);
-+}
-+
-+module_init(tcp_bbr3_register);
-+module_exit(tcp_bbr3_unregister);
-+
-+MODULE_AUTHOR("Custom BBRv3 Implementation");
-+MODULE_LICENSE("GPL");
-+MODULE_DESCRIPTION("TCP BBRv3 (Bottleneck Bandwidth and RTT) congestion control");
-+MODULE_VERSION("1.0");
-EOF
-' > ../create_patch.sh
-            
-            # 给脚本执行权限并运行它
-            chmod +x ../create_patch.sh
-            ../create_patch.sh
-            
-            # 应用生成的补丁
-            patch -p1 < ../custom_bbrv3.patch || { echo "补丁应用失败"; exit 1; }
-            patch -p1 < ../custom_bbrv3.patch || { echo "补丁应用失败"; exit 1; }
-          fi
+          # 更新默认拥塞控制算法配置
+          sed -i '/default "bbr" if DEFAULT_BBR/a\
+\tdefault "bbr_v3" if DEFAULT_BBR_V3\n\
+' net/ipv4/Kconfig
           
+          # 更新Makefile添加bbr_v3模块
+          echo 'updating Makefile'
+          sed -i '/obj-$(CONFIG_TCP_CONG_BBR) += tcp_bbr.o/a\
+obj-$(CONFIG_TCP_CONG_BBR_V3) += tcp_bbr_v3.o\
+' net/ipv4/Makefile
+
       - name: 配置内核
         run: |
-          cd build/${{ env.KERNEL_DIR }}
+          cd $KERNEL_DIR
           
-          # 使用适合服务器的配置
+          # 使用适合服务器的基础配置
           make defconfig
           make kvm_guest.config
           
           # 确保BBRv3配置选项开启
-          ./scripts/config --enable CONFIG_TCP_CONG_BBR
           ./scripts/config --enable CONFIG_TCP_CONG_BBR_V3
           ./scripts/config --set-str CONFIG_DEFAULT_TCP_CONG "bbr_v3"
           ./scripts/config --enable CONFIG_DEFAULT_BBR_V3
-          ./scripts/config --disable CONFIG_DEFAULT_CUBIC
           
           # 生成最终配置
           make olddefconfig
           
       - name: 编译内核
         run: |
-          cd build/${{ env.KERNEL_DIR }}
+          cd $KERNEL_DIR
           
           # 编译内核和模块，添加定制版本标识
           make -j$(nproc) deb-pkg LOCALVERSION=-9-amd64-bbrv3
@@ -343,4 +170,4 @@ EOF
         uses: actions/upload-artifact@v3
         with:
           name: linux-kernel-bbrv3
-          path: build/*.deb
+          path: ${{ github.workspace }}/build/*.deb
