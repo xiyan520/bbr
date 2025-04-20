@@ -5,48 +5,40 @@ on:
 
 jobs:
   build_kernel:
-    runs-on: ubuntu-latest # 使用最新的 Ubuntu runner
+    runs-on: ubuntu-latest
 
     steps:
     - name: 准备环境和工具链
       run: |
-        # 更新 apt 包列表 (第一次)
         echo "--> 第一次 apt-get update"
         sudo apt-get update
         echo "<-- 第一次 apt-get update 完成"
 
-        # --- 确保添加标准的 deb-src 仓库 ---
         echo "--> 添加标准的 deb-src 仓库到 sources.list"
-        # 动态获取 Ubuntu 版本代号 (例如 noble)
         UBUNTU_CODENAME=$(lsb_release -sc)
         echo "检测到 Ubuntu 版本代号: $UBUNTU_CODENAME"
-
-        # 添加主要的 deb-src 源 (main, restricted, universe, multiverse)
         echo "deb-src http://archive.ubuntu.com/ubuntu/ $UBUNTU_CODENAME main restricted universe multiverse" | sudo tee -a /etc/apt/sources.list
         echo "deb-src http://archive.ubuntu.com/ubuntu/ $UBUNTU_CODENAME-updates main restricted universe multiverse" | sudo tee -a /etc/apt/sources.list
         echo "deb-src http://archive.ubuntu.com/ubuntu/ $UBUNTU_CODENAME-security main restricted universe multiverse" | sudo tee -a /etc/apt/sources.list
         echo "deb-src http://archive.ubuntu.com/ubuntu/ $UBUNTU_CODENAME-backports main restricted universe multiverse" | sudo tee -a /etc/apt/sources.list
-
         # (可选但无害) 再次尝试取消注释已存在的 deb-src 行，以防万一格式不同
         # sudo sed -i 's/^#\s*deb-src/deb-src/' /etc/apt/sources.list
-
         echo "<-- 添加 deb-src 仓库完成"
 
-        # 再次更新 apt 包列表以加载 deb-src 信息
         echo "--> 第二次 apt-get update (加载 deb-src 信息)"
         sudo apt-get update
         echo "<-- 第二次 apt-get update 完成"
-        # -------------------------------------------
 
-        # 安装编译内核所需的大部分依赖
         echo "--> 运行 apt-get build-dep linux"
         sudo apt-get build-dep linux -y
         echo "<-- apt-get build-dep linux 完成"
 
         # 安装编译 .deb 包所需的额外工具
-        echo "--> 安装额外的构建工具"
-        sudo apt-get install -y fakeroot kernel-package ncurses-dev xz-utils libssl-dev build-essential cpio flex bison libelf-dev libncurses-dev libslang2-dev rsync
+        # --- 移除 kernel-package 包 ---
+        echo "--> 安装额外的构建工具 (移除 kernel-package)"
+        sudo apt-get install -y fakeroot ncurses-dev xz-utils libssl-dev build-essential cpio flex bison libelf-dev libncurses-dev libslang2-dev rsync
         echo "<-- 安装额外的构建工具完成"
+        # ---------------------------
 
     - name: 克隆 Linux 内核源码 (v6.1 分支)
       run: |
@@ -82,5 +74,5 @@ jobs:
       with:
         name: kernel-debs
         path: ../*.deb
-      env: # 添加一些环境变量帮助排查上传问题 (可选)
-        ACTIONS_STEP_DEBUG: true # 启用步骤调试日志
+      env:
+        ACTIONS_STEP_DEBUG: true
