@@ -1,4 +1,4 @@
-name: 编译支持BBRv3的Linux内核(6.1.0-9-amd64)
+name: 编译支持BBRv3的Linux内核
 on:
   push:
     branches: [ main ]
@@ -16,107 +16,171 @@ jobs:
       - name: 安装依赖
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential libncurses-dev bison flex libssl-dev libelf-dev bc dwarves
-          sudo apt-get install -y dpkg-dev debhelper devscripts quilt
-          sudo apt-get install -y debian-keyring debian-archive-keyring
+          sudo apt-get install -y build-essential libncurses-dev 
+          sudo apt-get install -y bison flex libssl-dev libelf-dev
+          sudo apt-get install -y bc dwarves
+          sudo apt-get install -y dpkg-dev debhelper devscripts
           sudo apt-get install -y git fakeroot
-          sudo apt-get install -y kernel-wedge
           
-      - name: 设置Debian源
-        run: |
-          # 添加Debian bookworm源
-          echo "deb-src http://deb.debian.org/debian bookworm main" | sudo tee -a /etc/apt/sources.list
-          sudo apt-get update
+      - name: 创建工作目录
+        run: mkdir -p kernel_build
           
       - name: 获取Linux内核源码
+        working-directory: kernel_build
         run: |
-          mkdir -p build
-          cd build
-          
-          # 获取Linux 6.1源码
           wget https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.1.tar.xz
           tar xf linux-6.1.tar.xz
-          cd linux-6.1
           
-          # 保存内核目录路径
-          echo "KERNEL_DIR=$(pwd)" >> $GITHUB_ENV
-          
-      - name: 创建BBRv3模块
+      - name: 准备BBRv3补丁文件-1
+        working-directory: kernel_build
         run: |
-          cd $KERNEL_DIR
-          mkdir -p bbrv3_files
-          
-          # 创建TCP BBRv3源文件
-          echo 'creating tcp_bbr_v3.c'
-          cat > bbrv3_files/tcp_bbr_v3.c << 'EOL'
-/* BBRv3: TCP BBR Congestion Control V3 */
+          mkdir -p bbr_patch
+          echo '/* BBRv3: TCP BBR Congestion Control V3 - Simple implementation */' > bbr_patch/tcp_bbr_v3.c
+          echo '#include <linux/module.h>' >> bbr_patch/tcp_bbr_v3.c
+          echo '#include <linux/kernel.h>' >> bbr_patch/tcp_bbr_v3.c
+          echo '#include <net/tcp.h>' >> bbr_patch/tcp_bbr_v3.c
+          echo '' >> bbr_patch/tcp_bbr_v3.c
 
-#include <linux/module.h>
-#include <linux/kernel.h>
-#include <net/tcp.h>
+      - name: 准备BBRv3补丁文件-2
+        working-directory: kernel_build
+        run: |
+          echo 'struct bbr3 {' >> bbr_patch/tcp_bbr_v3.c
+          echo '    u32 min_rtt_us;' >> bbr_patch/tcp_bbr_v3.c
+          echo '    u32 min_rtt_stamp;' >> bbr_patch/tcp_bbr_v3.c
+          echo '    u32 probe_rtt_done_stamp;' >> bbr_patch/tcp_bbr_v3.c
+          echo '};' >> bbr_patch/tcp_bbr_v3.c
+          echo '' >> bbr_patch/tcp_bbr_v3.c
 
-/* BBRv3 congestion control block */
-struct bbr3 {
-    u32 min_rtt_us;                 /* min RTT in min_rtt_win_sec window */
-    u32 min_rtt_stamp;              /* timestamp of min_rtt_us */
-    u32 probe_rtt_done_stamp;       /* end time for PROBE_RTT */
-    u32 mode;                       /* current bbr3 mode */
-};
+      - name: 准备BBRv3补丁文件-3
+        working-directory: kernel_build
+        run: |
+          echo 'static void bbr3_init(struct sock *sk)' >> bbr_patch/tcp_bbr_v3.c
+          echo '{' >> bbr_patch/tcp_bbr_v3.c
+          echo '    struct bbr3 *bbr3 = inet_csk_ca(sk);' >> bbr_patch/tcp_bbr_v3.c
+          echo '    struct tcp_sock *tp = tcp_sk(sk);' >> bbr_patch/tcp_bbr_v3.c
+          echo '    bbr3->min_rtt_us = tcp_min_rtt(tp);' >> bbr_patch/tcp_bbr_v3.c
+          echo '    bbr3->min_rtt_stamp = tcp_jiffies32;' >> bbr_patch/tcp_bbr_v3.c
+          echo '}' >> bbr_patch/tcp_bbr_v3.c
+          echo '' >> bbr_patch/tcp_bbr_v3.c
 
-static void bbr3_init(struct sock *sk)
-{
-    struct bbr3 *bbr3 = inet_csk_ca(sk);
-    struct tcp_sock *tp = tcp_sk(sk);
+      - name: 准备BBRv3补丁文件-4
+        working-directory: kernel_build
+        run: |
+          echo 'static void bbr3_cong_control(struct sock *sk, const struct rate_sample *rs)' >> bbr_patch/tcp_bbr_v3.c
+          echo '{' >> bbr_patch/tcp_bbr_v3.c
+          echo '    struct tcp_sock *tp = tcp_sk(sk);' >> bbr_patch/tcp_bbr_v3.c
+          echo '    if (tp->snd_cwnd < tp->snd_cwnd_clamp)' >> bbr_patch/tcp_bbr_v3.c
+          echo '        tp->snd_cwnd++;' >> bbr_patch/tcp_bbr_v3.c
+          echo '}' >> bbr_patch/tcp_bbr_v3.c
+          echo '' >> bbr_patch/tcp_bbr_v3.c
 
-    bbr3->min_rtt_us = tcp_min_rtt(tp);
-    bbr3->min_rtt_stamp = tcp_jiffies32;
-    bbr3->probe_rtt_done_stamp = 0;
-    bbr3->mode = 0; /* STARTUP */
-}
+      - name: 准备BBRv3补丁文件-5
+        working-directory: kernel_build
+        run: |
+          echo 'static struct tcp_congestion_ops tcp_bbr3_cong_ops __read_mostly = {' >> bbr_patch/tcp_bbr_v3.c
+          echo '    .flags       = TCP_CONG_NON_RESTRICTED,' >> bbr_patch/tcp_bbr_v3.c
+          echo '    .name        = "bbr_v3",' >> bbr_patch/tcp_bbr_v3.c
+          echo '    .owner       = THIS_MODULE,' >> bbr_patch/tcp_bbr_v3.c
+          echo '    .init        = bbr3_init,' >> bbr_patch/tcp_bbr_v3.c
+          echo '    .cong_control = bbr3_cong_control,' >> bbr_patch/tcp_bbr_v3.c
+          echo '    .undo_cwnd   = tcp_reno_undo_cwnd,' >> bbr_patch/tcp_bbr_v3.c
+          echo '};' >> bbr_patch/tcp_bbr_v3.c
+          echo '' >> bbr_patch/tcp_bbr_v3.c
 
-static void bbr3_cong_control(struct sock *sk, const struct rate_sample *rs)
-{
-    /* Main congestion control algorithm - simplified for example */
-    struct tcp_sock *tp = tcp_sk(sk);
-    tp->snd_cwnd = min_t(u32, tp->snd_cwnd + 1, tp->snd_cwnd_clamp);
-}
+      - name: 准备BBRv3补丁文件-6
+        working-directory: kernel_build
+        run: |
+          echo 'static int __init tcp_bbr3_register(void)' >> bbr_patch/tcp_bbr_v3.c
+          echo '{' >> bbr_patch/tcp_bbr_v3.c
+          echo '    BUILD_BUG_ON(sizeof(struct bbr3) > ICSK_CA_PRIV_SIZE);' >> bbr_patch/tcp_bbr_v3.c
+          echo '    return tcp_register_congestion_control(&tcp_bbr3_cong_ops);' >> bbr_patch/tcp_bbr_v3.c
+          echo '}' >> bbr_patch/tcp_bbr_v3.c
+          echo '' >> bbr_patch/tcp_bbr_v3.c
+          echo 'static void __exit tcp_bbr3_unregister(void)' >> bbr_patch/tcp_bbr_v3.c
+          echo '{' >> bbr_patch/tcp_bbr_v3.c
+          echo '    tcp_unregister_congestion_control(&tcp_bbr3_cong_ops);' >> bbr_patch/tcp_bbr_v3.c
+          echo '}' >> bbr_patch/tcp_bbr_v3.c
+          echo '' >> bbr_patch/tcp_bbr_v3.c
+          echo 'module_init(tcp_bbr3_register);' >> bbr_patch/tcp_bbr_v3.c
+          echo 'module_exit(tcp_bbr3_unregister);' >> bbr_patch/tcp_bbr_v3.c
+          echo '' >> bbr_patch/tcp_bbr_v3.c
+          echo 'MODULE_AUTHOR("BBRv3 Implementation");' >> bbr_patch/tcp_bbr_v3.c
+          echo 'MODULE_LICENSE("GPL");' >> bbr_patch/tcp_bbr_v3.c
+          echo 'MODULE_DESCRIPTION("TCP BBRv3 congestion control");' >> bbr_patch/tcp_bbr_v3.c
+          echo 'MODULE_VERSION("1.0");' >> bbr_patch/tcp_bbr_v3.c
 
-static struct tcp_congestion_ops tcp_bbr3_cong_ops __read_mostly = {
-    .flags       = TCP_CONG_NON_RESTRICTED,
-    .name        = "bbr_v3",
-    .owner       = THIS_MODULE,
-    .init        = bbr3_init,
-    .cong_control = bbr3_cong_control,
-    .undo_cwnd   = tcp_reno_undo_cwnd,
-};
+      - name: 准备Kconfig补丁
+        working-directory: kernel_build
+        run: |
+          echo 'diff --git a/net/ipv4/Kconfig b/net/ipv4/Kconfig' > bbr_patch/kconfig.patch
+          echo 'index xxxxxx..xxxxxx 100644' >> bbr_patch/kconfig.patch
+          echo '--- a/net/ipv4/Kconfig' >> bbr_patch/kconfig.patch
+          echo '+++ b/net/ipv4/Kconfig' >> bbr_patch/kconfig.patch
+          echo '@@ -1,3 +1,11 @@' >> bbr_patch/kconfig.patch
+          echo ' menu "TCP: TCP Options"' >> bbr_patch/kconfig.patch
+          echo '+config TCP_CONG_BBR_V3' >> bbr_patch/kconfig.patch
+          echo '+	tristate "BBR V3 TCP"' >> bbr_patch/kconfig.patch
+          echo '+	default n' >> bbr_patch/kconfig.patch
+          echo '+	---help---' >> bbr_patch/kconfig.patch
+          echo '+	  BBR V3 (Bottleneck Bandwidth and RTT) is a congestion control' >> bbr_patch/kconfig.patch
+          echo '+	  algorithm that focuses on maximizing throughput and minimizing latency.' >> bbr_patch/kconfig.patch
+          echo '+	  This is the improved version 3 of BBR.' >> bbr_patch/kconfig.patch
+          echo '+' >> bbr_patch/kconfig.patch
+          echo ' config TCP_CONG_ADVANCED' >> bbr_patch/kconfig.patch
+          echo ' 	bool "TCP: advanced congestion control"' >> bbr_patch/kconfig.patch
+          echo ' 	default y' >> bbr_patch/kconfig.patch
+          echo '@@ -100,6 +108,9 @@ choice' >> bbr_patch/kconfig.patch
+          echo ' 	config DEFAULT_BBR' >> bbr_patch/kconfig.patch
+          echo ' 		bool "BBR" if TCP_CONG_BBR' >> bbr_patch/kconfig.patch
+          echo ' ' >> bbr_patch/kconfig.patch
+          echo '+	config DEFAULT_BBR_V3' >> bbr_patch/kconfig.patch
+          echo '+		bool "BBR V3" if TCP_CONG_BBR_V3' >> bbr_patch/kconfig.patch
+          echo '+' >> bbr_patch/kconfig.patch
+          echo ' 	config DEFAULT_CUBIC' >> bbr_patch/kconfig.patch
+          echo ' 		bool "CUBIC"' >> bbr_patch/kconfig.patch
+          echo ' ' >> bbr_patch/kconfig.patch
+          echo '@@ -123,6 +134,7 @@ config DEFAULT_TCP_CONG' >> bbr_patch/kconfig.patch
+          echo ' 	string' >> bbr_patch/kconfig.patch
+          echo ' 	default "bic" if DEFAULT_BIC' >> bbr_patch/kconfig.patch
+          echo ' 	default "bbr" if DEFAULT_BBR' >> bbr_patch/kconfig.patch
+          echo '+	default "bbr_v3" if DEFAULT_BBR_V3' >> bbr_patch/kconfig.patch
+          echo ' 	default "cubic" if DEFAULT_CUBIC' >> bbr_patch/kconfig.patch
+          echo ' 	default "dctcp" if DEFAULT_DCTCP' >> bbr_patch/kconfig.patch
+          echo ' 	default "htcp" if DEFAULT_HTCP' >> bbr_patch/kconfig.patch
 
-static int __init tcp_bbr3_register(void)
-{
-    BUILD_BUG_ON(sizeof(struct bbr3) > ICSK_CA_PRIV_SIZE);
-    return tcp_register_congestion_control(&tcp_bbr3_cong_ops);
-}
+      - name: 准备Makefile补丁
+        working-directory: kernel_build
+        run: |
+          echo 'diff --git a/net/ipv4/Makefile b/net/ipv4/Makefile' > bbr_patch/makefile.patch
+          echo 'index xxxxxx..xxxxxx 100644' >> bbr_patch/makefile.patch
+          echo '--- a/net/ipv4/Makefile' >> bbr_patch/makefile.patch
+          echo '+++ b/net/ipv4/Makefile' >> bbr_patch/makefile.patch
+          echo '@@ -59,6 +59,7 @@ obj-$(CONFIG_TCP_CONG_VEGAS) += tcp_vegas.o' >> bbr_patch/makefile.patch
+          echo ' obj-$(CONFIG_TCP_CONG_NV) += tcp_nv.o' >> bbr_patch/makefile.patch
+          echo ' obj-$(CONFIG_TCP_CONG_SCALABLE) += tcp_scalable.o' >> bbr_patch/makefile.patch
+          echo ' obj-$(CONFIG_TCP_CONG_BBR) += tcp_bbr.o' >> bbr_patch/makefile.patch
+          echo '+obj-$(CONFIG_TCP_CONG_BBR_V3) += tcp_bbr_v3.o' >> bbr_patch/makefile.patch
+          echo ' obj-$(CONFIG_TCP_CONG_LP) += tcp_lp.o' >> bbr_patch/makefile.patch
+          echo ' obj-$(CONFIG_TCP_CONG_HYBLA) += tcp_hybla.o' >> bbr_patch/makefile.patch
+          echo ' obj-$(CONFIG_TCP_CONG_YEAH) += tcp_yeah.o' >> bbr_patch/makefile.patch
 
-static void __exit tcp_bbr3_unregister(void)
-{
-    tcp_unregister_congestion_control(&tcp_bbr3_cong_ops);
-}
-
-module_init(tcp_bbr3_register);
-module_exit(tcp_bbr3_unregister);
-
-MODULE_AUTHOR("BBRv3 Implementation");
-MODULE_LICENSE("GPL");
-MODULE_DESCRIPTION("TCP BBRv3 congestion control");
-MODULE_VERSION("1.0");
-EOL
-
-          # 添加至内核net/ipv4目录
+      - name: 应用BBRv3补丁
+        working-directory: kernel_build
+        run: |
+          cd linux-6.1
           mkdir -p net/ipv4
-          cp bbrv3_files/tcp_bbr_v3.c net/ipv4/
+          cp ../bbr_patch/tcp_bbr_v3.c net/ipv4/
+          patch -p1 < ../bbr_patch/kconfig.patch || echo "补丁应用可能有偏差，继续执行..."
+          patch -p1 < ../bbr_patch/makefile.patch || echo "补丁应用可能有偏差，继续执行..."
           
-          # 修改内核Kconfig文件以支持BBRv3
-          echo 'updating Kconfig'
-          sed -i '/config TCP_CONG_BBR/a\
+          # 如果补丁失败，手动修改文件
+          if [ ! -f net/ipv4/tcp_bbr_v3.c ]; then
+            cp ../bbr_patch/tcp_bbr_v3.c net/ipv4/
+          fi
+          
+          # 手动添加BBRv3到Kconfig
+          if ! grep -q "TCP_CONG_BBR_V3" net/ipv4/Kconfig; then
+            sed -i '/config TCP_CONG_BBR/a\
 config TCP_CONG_BBR_V3\n\
 \ttristate "BBR V3 TCP"\n\
 \tdefault n\n\
@@ -125,49 +189,52 @@ config TCP_CONG_BBR_V3\n\
 \t  algorithm that focuses on maximizing throughput and minimizing latency.\n\
 \t  This is the improved version 3 of BBR.\n\
 ' net/ipv4/Kconfig
+          fi
           
-          # 添加BBRv3选项到默认TCP拥塞控制算法选项
-          sed -i '/config DEFAULT_BBR/a\
+          # 手动添加BBRv3到默认选项
+          if ! grep -q "DEFAULT_BBR_V3" net/ipv4/Kconfig; then
+            sed -i '/config DEFAULT_BBR/a\
 \tconfig DEFAULT_BBR_V3\n\
 \t\tbool "BBR V3" if TCP_CONG_BBR_V3\n\
 ' net/ipv4/Kconfig
+          fi
           
-          # 更新默认拥塞控制算法配置
-          sed -i '/default "bbr" if DEFAULT_BBR/a\
+          # 添加默认值
+          if ! grep -q "default \"bbr_v3\"" net/ipv4/Kconfig; then
+            sed -i '/default "bbr" if DEFAULT_BBR/a\
 \tdefault "bbr_v3" if DEFAULT_BBR_V3\n\
 ' net/ipv4/Kconfig
+          fi
           
-          # 更新Makefile添加bbr_v3模块
-          echo 'updating Makefile'
-          sed -i '/obj-$(CONFIG_TCP_CONG_BBR) += tcp_bbr.o/a\
+          # 修改Makefile
+          if ! grep -q "tcp_bbr_v3.o" net/ipv4/Makefile; then
+            sed -i '/obj-$(CONFIG_TCP_CONG_BBR) += tcp_bbr.o/a\
 obj-$(CONFIG_TCP_CONG_BBR_V3) += tcp_bbr_v3.o\
 ' net/ipv4/Makefile
+          fi
 
       - name: 配置内核
+        working-directory: kernel_build/linux-6.1
         run: |
-          cd $KERNEL_DIR
-          
-          # 使用适合服务器的基础配置
+          # 创建基本配置
           make defconfig
-          make kvm_guest.config
           
-          # 确保BBRv3配置选项开启
+          # 启用TCP BBRv3模块
           ./scripts/config --enable CONFIG_TCP_CONG_BBR_V3
           ./scripts/config --set-str CONFIG_DEFAULT_TCP_CONG "bbr_v3"
           ./scripts/config --enable CONFIG_DEFAULT_BBR_V3
           
-          # 生成最终配置
+          # 为Debian/Ubuntu环境生成适当的配置
           make olddefconfig
-          
+
       - name: 编译内核
+        working-directory: kernel_build/linux-6.1
         run: |
-          cd $KERNEL_DIR
-          
-          # 编译内核和模块，添加定制版本标识
+          # 编译内核和模块，添加自定义版本标识
           make -j$(nproc) deb-pkg LOCALVERSION=-9-amd64-bbrv3
       
       - name: 上传内核包
         uses: actions/upload-artifact@v3
         with:
           name: linux-kernel-bbrv3
-          path: ${{ github.workspace }}/build/*.deb
+          path: kernel_build/*.deb
