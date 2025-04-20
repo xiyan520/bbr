@@ -1,240 +1,75 @@
-name: 编译支持BBRv3的Linux内核
+name: 编译 Linux 6.1.0-9-amd64 内核 (使用 BBRv3 配置)
+
 on:
-  push:
-    branches: [ main ]
-  pull_request:
-    branches: [ main ]
+  # 手动触发工作流
   workflow_dispatch:
 
 jobs:
-  build:
-    runs-on: ubuntu-latest
+  build_kernel:
+    runs-on: ubuntu-latest # 使用最新的 Ubuntu runner
+
     steps:
-      - name: 检出代码
-        uses: actions/checkout@v3
-        
-      - name: 安装依赖
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential libncurses-dev 
-          sudo apt-get install -y bison flex libssl-dev libelf-dev
-          sudo apt-get install -y bc dwarves
-          sudo apt-get install -y dpkg-dev debhelper devscripts
-          sudo apt-get install -y git fakeroot
-          
-      - name: 创建工作目录
-        run: mkdir -p kernel_build
-          
-      - name: 获取Linux内核源码
-        working-directory: kernel_build
-        run: |
-          wget https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.1.tar.xz
-          tar xf linux-6.1.tar.xz
-          
-      - name: 准备BBRv3补丁文件-1
-        working-directory: kernel_build
-        run: |
-          mkdir -p bbr_patch
-          echo '/* BBRv3: TCP BBR Congestion Control V3 - Simple implementation */' > bbr_patch/tcp_bbr_v3.c
-          echo '#include <linux/module.h>' >> bbr_patch/tcp_bbr_v3.c
-          echo '#include <linux/kernel.h>' >> bbr_patch/tcp_bbr_v3.c
-          echo '#include <net/tcp.h>' >> bbr_patch/tcp_bbr_v3.c
-          echo '' >> bbr_patch/tcp_bbr_v3.c
+    - name: 准备环境和工具链
+      run: |
+        # 更新 apt 包列表并安装必要的构建依赖
+        sudo apt-get update
+        # build-dep linux 会安装编译内核所需的大部分依赖
+        sudo apt-get build-dep linux -y
+        # 安装编译 .deb 包所需的额外工具
+        sudo apt-get install -y fakeroot kernel-package ncurses-dev xz-utils libssl-dev build-essential cpio flex bison libelf-dev libncurses-dev libslang2-dev rsync
 
-      - name: 准备BBRv3补丁文件-2
-        working-directory: kernel_build
-        run: |
-          echo 'struct bbr3 {' >> bbr_patch/tcp_bbr_v3.c
-          echo '    u32 min_rtt_us;' >> bbr_patch/tcp_bbr_v3.c
-          echo '    u32 min_rtt_stamp;' >> bbr_patch/tcp_bbr_v3.c
-          echo '    u32 probe_rtt_done_stamp;' >> bbr_patch/tcp_bbr_v3.c
-          echo '};' >> bbr_patch/tcp_bbr_v3.c
-          echo '' >> bbr_patch/tcp_bbr_v3.c
+    - name: 克隆 Linux 内核源码 (v6.1 分支)
+      run: |
+        # 克隆主线 Linux 内核仓库，获取 v6.1 分支
+        git clone https://github.com/torvalds/linux.git kernel-source
+        cd kernel-source
+        git checkout v6.1 # 切换到 v6.1 分支
 
-      - name: 准备BBRv3补丁文件-3
-        working-directory: kernel_build
-        run: |
-          echo 'static void bbr3_init(struct sock *sk)' >> bbr_patch/tcp_bbr_v3.c
-          echo '{' >> bbr_patch/tcp_bbr_v3.c
-          echo '    struct bbr3 *bbr3 = inet_csk_ca(sk);' >> bbr_patch/tcp_bbr_v3.c
-          echo '    struct tcp_sock *tp = tcp_sk(sk);' >> bbr_patch/tcp_bbr_v3.c
-          echo '    bbr3->min_rtt_us = tcp_min_rtt(tp);' >> bbr_patch/tcp_bbr_v3.c
-          echo '    bbr3->min_rtt_stamp = tcp_jiffies32;' >> bbr_patch/tcp_bbr_v3.c
-          echo '}' >> bbr_patch/tcp_bbr_v3.c
-          echo '' >> bbr_patch/tcp_bbr_v3.c
+    - name: 准备内核配置 (.config) 并启用 BBR
+      run: |
+        cd kernel-source
 
-      - name: 准备BBRv3补丁文件-4
-        working-directory: kernel_build
-        run: |
-          echo 'static void bbr3_cong_control(struct sock *sk, const struct rate_sample *rs)' >> bbr_patch/tcp_bbr_v3.c
-          echo '{' >> bbr_patch/tcp_bbr_v3.c
-          echo '    struct tcp_sock *tp = tcp_sk(sk);' >> bbr_patch/tcp_bbr_v3.c
-          echo '    if (tp->snd_cwnd < tp->snd_cwnd_clamp)' >> bbr_patch/tcp_bbr_v3.c
-          echo '        tp->snd_cwnd++;' >> bbr_patch/tcp_bbr_v3.c
-          echo '}' >> bbr_patch/tcp_bbr_v3.c
-          echo '' >> bbr_patch/tcp_bbr_v3.c
+        # 方式1: 使用默认配置 (可能需要根据提示选择新选项)
+        # make defconfig
 
-      - name: 准备BBRv3补丁文件-5
-        working-directory: kernel_build
-        run: |
-          echo 'static struct tcp_congestion_ops tcp_bbr3_cong_ops __read_mostly = {' >> bbr_patch/tcp_bbr_v3.c
-          echo '    .flags       = TCP_CONG_NON_RESTRICTED,' >> bbr_patch/tcp_bbr_v3.c
-          echo '    .name        = "bbr_v3",' >> bbr_patch/tcp_bbr_v3.c
-          echo '    .owner       = THIS_MODULE,' >> bbr_patch/tcp_bbr_v3.c
-          echo '    .init        = bbr3_init,' >> bbr_patch/tcp_bbr_v3.c
-          echo '    .cong_control = bbr3_cong_control,' >> bbr_patch/tcp_bbr_v3.c
-          echo '    .undo_cwnd   = tcp_reno_undo_cwnd,' >> bbr_patch/tcp_bbr_v3.c
-          echo '};' >> bbr_patch/tcp_bbr_v3.c
-          echo '' >> bbr_patch/tcp_bbr_v3.c
+        # 方式2: 如果你有现有的配置文件 (例如从 /boot/config-...)
+        # 将你的配置文件命名为 .config 放在 kernel-source 目录下
+        # cp /path/to/your/config .config
 
-      - name: 准备BBRv3补丁文件-6
-        working-directory: kernel_build
-        run: |
-          echo 'static int __init tcp_bbr3_register(void)' >> bbr_patch/tcp_bbr_v3.c
-          echo '{' >> bbr_patch/tcp_bbr_v3.c
-          echo '    BUILD_BUG_ON(sizeof(struct bbr3) > ICSK_CA_PRIV_SIZE);' >> bbr_patch/tcp_bbr_v3.c
-          echo '    return tcp_register_congestion_control(&tcp_bbr3_cong_ops);' >> bbr_patch/tcp_bbr_v3.c
-          echo '}' >> bbr_patch/tcp_bbr_v3.c
-          echo '' >> bbr_patch/tcp_bbr_v3.c
-          echo 'static void __exit tcp_bbr3_unregister(void)' >> bbr_patch/tcp_bbr_v3.c
-          echo '{' >> bbr_patch/tcp_bbr_v3.c
-          echo '    tcp_unregister_congestion_control(&tcp_bbr3_cong_ops);' >> bbr_patch/tcp_bbr_v3.c
-          echo '}' >> bbr_patch/tcp_bbr_v3.c
-          echo '' >> bbr_patch/tcp_bbr_v3.c
-          echo 'module_init(tcp_bbr3_register);' >> bbr_patch/tcp_bbr_v3.c
-          echo 'module_exit(tcp_bbr3_unregister);' >> bbr_patch/tcp_bbr_v3.c
-          echo '' >> bbr_patch/tcp_bbr_v3.c
-          echo 'MODULE_AUTHOR("BBRv3 Implementation");' >> bbr_patch/tcp_bbr_v3.c
-          echo 'MODULE_LICENSE("GPL");' >> bbr_patch/tcp_bbr_v3.c
-          echo 'MODULE_DESCRIPTION("TCP BBRv3 congestion control");' >> bbr_patch/tcp_bbr_v3.c
-          echo 'MODULE_VERSION("1.0");' >> bbr_patch/tcp_bbr_v3.c
+        # 为了自动化，这里使用 defconfig 并手动修改或使用 oldconfig
+        # 使用 defconfig 生成基础配置
+        make defconfig
 
-      - name: 准备Kconfig补丁
-        working-directory: kernel_build
-        run: |
-          echo 'diff --git a/net/ipv4/Kconfig b/net/ipv4/Kconfig' > bbr_patch/kconfig.patch
-          echo 'index xxxxxx..xxxxxx 100644' >> bbr_patch/kconfig.patch
-          echo '--- a/net/ipv4/Kconfig' >> bbr_patch/kconfig.patch
-          echo '+++ b/net/ipv4/Kconfig' >> bbr_patch/kconfig.patch
-          echo '@@ -1,3 +1,11 @@' >> bbr_patch/kconfig.patch
-          echo ' menu "TCP: TCP Options"' >> bbr_patch/kconfig.patch
-          echo '+config TCP_CONG_BBR_V3' >> bbr_patch/kconfig.patch
-          echo '+	tristate "BBR V3 TCP"' >> bbr_patch/kconfig.patch
-          echo '+	default n' >> bbr_patch/kconfig.patch
-          echo '+	---help---' >> bbr_patch/kconfig.patch
-          echo '+	  BBR V3 (Bottleneck Bandwidth and RTT) is a congestion control' >> bbr_patch/kconfig.patch
-          echo '+	  algorithm that focuses on maximizing throughput and minimizing latency.' >> bbr_patch/kconfig.patch
-          echo '+	  This is the improved version 3 of BBR.' >> bbr_patch/kconfig.patch
-          echo '+' >> bbr_patch/kconfig.patch
-          echo ' config TCP_CONG_ADVANCED' >> bbr_patch/kconfig.patch
-          echo ' 	bool "TCP: advanced congestion control"' >> bbr_patch/kconfig.patch
-          echo ' 	default y' >> bbr_patch/kconfig.patch
-          echo '@@ -100,6 +108,9 @@ choice' >> bbr_patch/kconfig.patch
-          echo ' 	config DEFAULT_BBR' >> bbr_patch/kconfig.patch
-          echo ' 		bool "BBR" if TCP_CONG_BBR' >> bbr_patch/kconfig.patch
-          echo ' ' >> bbr_patch/kconfig.patch
-          echo '+	config DEFAULT_BBR_V3' >> bbr_patch/kconfig.patch
-          echo '+		bool "BBR V3" if TCP_CONG_BBR_V3' >> bbr_patch/kconfig.patch
-          echo '+' >> bbr_patch/kconfig.patch
-          echo ' 	config DEFAULT_CUBIC' >> bbr_patch/kconfig.patch
-          echo ' 		bool "CUBIC"' >> bbr_patch/kconfig.patch
-          echo ' ' >> bbr_patch/kconfig.patch
-          echo '@@ -123,6 +134,7 @@ config DEFAULT_TCP_CONG' >> bbr_patch/kconfig.patch
-          echo ' 	string' >> bbr_patch/kconfig.patch
-          echo ' 	default "bic" if DEFAULT_BIC' >> bbr_patch/kconfig.patch
-          echo ' 	default "bbr" if DEFAULT_BBR' >> bbr_patch/kconfig.patch
-          echo '+	default "bbr_v3" if DEFAULT_BBR_V3' >> bbr_patch/kconfig.patch
-          echo ' 	default "cubic" if DEFAULT_CUBIC' >> bbr_patch/kconfig.patch
-          echo ' 	default "dctcp" if DEFAULT_DCTCP' >> bbr_patch/kconfig.patch
-          echo ' 	default "htcp" if DEFAULT_HTCP' >> bbr_patch/kconfig.patch
+        # 确保 BBR 和 FQ (Fair Queueing, BBR 推荐搭配) 被启用
+        # 查找并替换或添加配置项
+        # 注意：sed 命令需要根据 .config 文件中具体行的格式调整
+        # 如果配置项不存在，可能需要手动添加或使用 make menuconfig/oldconfig
+        # 以下是尝试启用 CONFIG_TCP_CONG_BBR 和 CONFIG_NET_SCH_FQ
+        echo "CONFIG_TCP_CONG_BBR=y" >> .config
+        echo "CONFIG_NET_SCH_FQ=y" >> .config
 
-      - name: 准备Makefile补丁
-        working-directory: kernel_build
-        run: |
-          echo 'diff --git a/net/ipv4/Makefile b/net/ipv4/Makefile' > bbr_patch/makefile.patch
-          echo 'index xxxxxx..xxxxxx 100644' >> bbr_patch/makefile.patch
-          echo '--- a/net/ipv4/Makefile' >> bbr_patch/makefile.patch
-          echo '+++ b/net/ipv4/Makefile' >> bbr_patch/makefile.patch
-          echo '@@ -59,6 +59,7 @@ obj-$(CONFIG_TCP_CONG_VEGAS) += tcp_vegas.o' >> bbr_patch/makefile.patch
-          echo ' obj-$(CONFIG_TCP_CONG_NV) += tcp_nv.o' >> bbr_patch/makefile.patch
-          echo ' obj-$(CONFIG_TCP_CONG_SCALABLE) += tcp_scalable.o' >> bbr_patch/makefile.patch
-          echo ' obj-$(CONFIG_TCP_CONG_BBR) += tcp_bbr.o' >> bbr_patch/makefile.patch
-          echo '+obj-$(CONFIG_TCP_CONG_BBR_V3) += tcp_bbr_v3.o' >> bbr_patch/makefile.patch
-          echo ' obj-$(CONFIG_TCP_CONG_LP) += tcp_lp.o' >> bbr_patch/makefile.patch
-          echo ' obj-$(CONFIG_TCP_CONG_HYBLA) += tcp_hybla.o' >> bbr_patch/makefile.patch
-          echo ' obj-$(CONFIG_TCP_CONG_YEAH) += tcp_yeah.o' >> bbr_patch/makefile.patch
+        # 运行 oldconfig 以处理新添加的或冲突的配置项
+        # 非交互模式下，它会接受默认值或跳过需要用户输入的选项
+        make oldconfig
 
-      - name: 应用BBRv3补丁
-        working-directory: kernel_build
-        run: |
-          cd linux-6.1
-          mkdir -p net/ipv4
-          cp ../bbr_patch/tcp_bbr_v3.c net/ipv4/
-          patch -p1 < ../bbr_patch/kconfig.patch || echo "补丁应用可能有偏差，继续执行..."
-          patch -p1 < ../bbr_patch/makefile.patch || echo "补丁应用可能有偏差，继续执行..."
-          
-          # 如果补丁失败，手动修改文件
-          if [ ! -f net/ipv4/tcp_bbr_v3.c ]; then
-            cp ../bbr_patch/tcp_bbr_v3.c net/ipv4/
-          fi
-          
-          # 手动添加BBRv3到Kconfig
-          if ! grep -q "TCP_CONG_BBR_V3" net/ipv4/Kconfig; then
-            sed -i '/config TCP_CONG_BBR/a\
-config TCP_CONG_BBR_V3\n\
-\ttristate "BBR V3 TCP"\n\
-\tdefault n\n\
-\t---help---\n\
-\t  BBR V3 (Bottleneck Bandwidth and RTT) is a congestion control\n\
-\t  algorithm that focuses on maximizing throughput and minimizing latency.\n\
-\t  This is the improved version 3 of BBR.\n\
-' net/ipv4/Kconfig
-          fi
-          
-          # 手动添加BBRv3到默认选项
-          if ! grep -q "DEFAULT_BBR_V3" net/ipv4/Kconfig; then
-            sed -i '/config DEFAULT_BBR/a\
-\tconfig DEFAULT_BBR_V3\n\
-\t\tbool "BBR V3" if TCP_CONG_BBR_V3\n\
-' net/ipv4/Kconfig
-          fi
-          
-          # 添加默认值
-          if ! grep -q "default \"bbr_v3\"" net/ipv4/Kconfig; then
-            sed -i '/default "bbr" if DEFAULT_BBR/a\
-\tdefault "bbr_v3" if DEFAULT_BBR_V3\n\
-' net/ipv4/Kconfig
-          fi
-          
-          # 修改Makefile
-          if ! grep -q "tcp_bbr_v3.o" net/ipv4/Makefile; then
-            sed -i '/obj-$(CONFIG_TCP_CONG_BBR) += tcp_bbr.o/a\
-obj-$(CONFIG_TCP_CONG_BBR_V3) += tcp_bbr_v3.o\
-' net/ipv4/Makefile
-          fi
+        # 再次检查 BBR 和 FQ 是否已启用 (可选)
+        grep CONFIG_TCP_CONG_BBR .config || echo "Warning: CONFIG_TCP_CONG_BBR not found or not enabled in .config"
+        grep CONFIG_NET_SCH_FQ .config || echo "Warning: CONFIG_NET_SCH_FQ not found or not enabled in .config"
 
-      - name: 配置内核
-        working-directory: kernel_build/linux-6.1
-        run: |
-          # 创建基本配置
-          make defconfig
-          
-          # 启用TCP BBRv3模块
-          ./scripts/config --enable CONFIG_TCP_CONG_BBR_V3
-          ./scripts/config --set-str CONFIG_DEFAULT_TCP_CONG "bbr_v3"
-          ./scripts/config --enable CONFIG_DEFAULT_BBR_V3
-          
-          # 为Debian/Ubuntu环境生成适当的配置
-          make olddefconfig
 
-      - name: 编译内核
-        working-directory: kernel_build/linux-6.1
-        run: |
-          # 编译内核和模块，添加自定义版本标识
-          make -j$(nproc) deb-pkg LOCALVERSION=-9-amd64-bbrv3
-      
-      - name: 上传内核包
-        uses: actions/upload-artifact@v3
-        with:
-          name: linux-kernel-bbrv3
-          path: kernel_build/*.deb
+    - name: 编译内核和模块，生成 Debian 包
+      run: |
+        cd kernel-source
+        # 设置环境变量，make deb-pkg 需要这些信息
+        export DEBEMAIL="github_actions@example.com" # 你的邮件地址
+        export DEBFULLNAME="GitHub Actions" # 你的名字
+
+        # 使用 make deb-pkg 编译内核、模块并生成 .deb 安装包
+        # -j $(nproc) 使用所有可用的 CPU 核心进行并行编译
+        make -j $(nproc) bindeb-pkg
+
+    - name: 上传生成的 Debian 包
+      uses: actions/upload-artifact@v4 # 使用上传产物的 action
+      with:
+        name: kernel-debs # 产物名称
+        path: ../*.deb # 指定上传路径，make bindeb-pkg 会将 .deb 包放在源码目录的上一级
